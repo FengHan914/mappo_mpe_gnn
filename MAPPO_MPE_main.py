@@ -10,7 +10,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 # from make_env import make_env
 # from env import mpe
-from env.enviroment import MutiAgentEnv
+from env.environment import MutiAgentEnv
 from mappo_mpe import MAPPO_MPE
 from normalization import Normalization, RewardScaling
 from replay_buffer import ReplayBuffer

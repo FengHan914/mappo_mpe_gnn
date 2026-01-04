@@ -1,6 +1,6 @@
 import argparse
 
-from env.enviroment import MutiAgentEnv
+from env.environment import MutiAgentEnv
 from mappo_mpe import *
 from scenes.entrap import Entrap_Scene
 
