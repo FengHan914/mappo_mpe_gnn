@@ -128,7 +128,6 @@ class Entrap_Scene:
             if agent.type == 0:
                 agent.obs_dim = len(self.observation(agent))
 
-    # 【请用下面的函数完整替换掉旧的 reset_world 函数】
     def reset_world(self, mode, vel=None, scenario_id=0):
         """
         根据场景ID重置世界。

@@ -292,14 +292,14 @@ class MAPPO_MPE:
                     self.actor.rnn_hidden = None
                     self.critic.rnn_hidden = None
                     actions_mean, actions_std, values_now = [], [], []
-                    for t in range(self.episode_limit):
+                    for t.py in range(self.episode_limit):
                         action_mean, action_std = self.actor(
-                            actor_inputs[index, t].reshape(self.mini_batch_size * self.N,
+                            actor_inputs[index, t.py].reshape(self.mini_batch_size * self.N,
                                                            -1))  # prob.shape=(mini_batch_size*N, action_dim)
                         actions_mean.append(action_mean.reshape(self.mini_batch_size, self.N,
                                                                 -1))  # prob.shape=(mini_batch_size,N,action_dim）
                         actions_std.append(action_std.reshape(self.mini_batch_size, self.N, -1))
-                        v = self.critic(critic_inputs[index, t].reshape(self.mini_batch_size * self.N,
+                        v = self.critic(critic_inputs[index, t.py].reshape(self.mini_batch_size * self.N,
                                                                         -1))  # v.shape=(mini_batch_size*N,1)
                         values_now.append(v.reshape(self.mini_batch_size, self.N))  # v.shape=(mini_batch_size,N)
                     # Stack them according to the time (dim=1)

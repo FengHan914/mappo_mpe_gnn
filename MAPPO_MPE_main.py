@@ -2,12 +2,14 @@
 import argparse
 import csv  # 确保此行存在
 import os
-
+# 必须在导入 torch 或 numpy 之前设置！
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+import matplotlib
+# matplotlib.use('Agg')  # <--- 设置非交互式后端
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from torch.utils.tensorboard import SummaryWriter
-
 # from make_env import make_env
 # from env import mpe
 from env.environment import MutiAgentEnv
@@ -190,7 +192,7 @@ class Runner_MAPPO_MPE:
 
 
     def run(self, ):
-        # --- 1. 初始化和路径设置 (保持不变) ---
+        # --- 初始化和路径设置---
         old_step = 0
         best_reward = -100
         name = self.algorithm_name
@@ -202,65 +204,20 @@ class Runner_MAPPO_MPE:
         if not os.path.exists(cur_checkpoint_dir):
             os.makedirs(cur_checkpoint_dir)
 
-        # --- 2. 【核心修改】定义课程学习的阶段和参数 ---
-        # 您可以根据需要调整这些步数阈值
-        # stage1_end_steps = self.args.max_train_steps  # 阶段一结束点: 前40万步，100%使用场景0
-        # stage2_end_steps = self.args.max_train_steps  # 阶段二结束点: 40万到70万步之间，从场景0逐步过渡到场景1
-
-        stage1_end_steps = self.args.max_train_steps / 3 # 阶段一结束点: 前40万步，100%使用场景0
-        stage2_end_steps = 2 * self.args.max_train_steps / 3  # 阶段二结束点: 40万到70万步之间，从场景0逐步过渡到场景1
-        # 阶段三: 70万步之后，从场景1逐步过渡到场景2
-
-        # 打印课程计划
-        print("\n" + "=" * 50)
-        print("课程学习计划已启动:")
-        print(f"  - [0, {stage1_end_steps} steps]: 100% 场景 0 (阵列初始)")
-        print(f"  - [{stage1_end_steps}, {stage2_end_steps} steps]: 从 场景 0 渐进混合到 场景 1")
-        print(f"  - [> {stage2_end_steps} steps]: 从 场景 1 渐进混合到 场景 2")
-        print("=" * 50 + "\n")
-
         evaluate_num = 1  # Record the number of evaluations
         while self.total_steps < self.args.max_train_steps:
-            # --- 3. 【核心修改】在每个回合开始前，根据课程计划决定场景ID ---
-            # a. 判断当前所处的课程阶段
-            if self.total_steps < stage1_end_steps:
-                # 阶段一：纯粹的简单场景
-                self.current_training_scenario = 0
-
-            elif self.total_steps < stage2_end_steps:
-                # 阶段二：从场景0向场景1混合过渡
-                # 计算在当前过渡阶段的进度 (从0.0到1.0)
-                progress = (self.total_steps - stage1_end_steps) / (stage2_end_steps - stage1_end_steps)
-                # 以 progress 的概率选择更难的场景1，否则继续使用场景0
-                if np.random.rand() < progress:
-                    self.current_training_scenario = 1
-                else:
-                    self.current_training_scenario = 0
-
-            else:  # self.total_steps >= stage2_end_steps
-                # 阶段三：从场景1向场景2(最难)混合过渡
-                # (为简化，我们假设第三阶段总时长为30万步，您也可以设为到max_train_steps)
-                stage3_duration = self.args.max_train_steps - stage2_end_steps
-                progress = (self.total_steps - stage2_end_steps) / stage3_duration
-                progress = min(progress, 1.0)  # 确保进度不超过1.0
-
-                if np.random.rand() < progress:
-                    self.current_training_scenario = 2
-                else:
-                    self.current_training_scenario = 1
-
-            # --- 4. 运行一个回合 (此函数将使用我们刚刚确定的场景ID) ---
+            # --- 运行一个回合 (此函数将使用我们刚刚确定的场景ID) ---
             rewards, episode_steps = self.run_episode_mpe(evaluate=False)
 
             self.total_steps += episode_steps
 
-            # --- 5. 后续的评估、保存、训练逻辑 (保持不变)
+            # --- 后续的评估、保存、训练逻辑 (保持不变)
             # 每evaluate_freq进行一次评价
             if self.total_steps // self.args.evaluate_freq > evaluate_num:
                 self.evaluate_policy()  # Evaluate the policy every 'evaluate_freq' steps
                 evaluate_num += 1
 
-            # --- 6. 【最终版-无新增变量】保持稀疏性，按 evaluate_freq 的频率记录训练奖励 ---
+            # --- 保持稀疏性，按 evaluate_freq 的频率记录训练奖励 ---
             if self.total_steps // self.args.evaluate_freq > (
                     self.total_steps - episode_steps) // self.args.evaluate_freq:
 
@@ -634,71 +591,44 @@ class Runner_MAPPO_MPE:
 if __name__ == '__main__':
     parser = argparse.ArgumentParser("Hyperparameters Setting for MAPPO in MPE environment")
     # 训练规模与时长参数
-    parser.add_argument("--max_train_steps", type=int, default=int(3e6),
-                        help=" Maximum number of training steps(定义了整个训练过程的总长度, 智能体与环境的总交互步数（timesteps）达到这个值时，训练将停止。)")  # 4000000 -2e6
-
+    parser.add_argument('--experiment_num', type=str, default="1", help='当前实验的编号/轮次')
+    parser.add_argument("--max_train_steps", type=int, default=int(2e6),
+                        help=" Maximum number of training steps(定义了整个训练过程的总长度, 智能体与环境的总交互步数（timesteps）达到这个值时，训练将停止。)")  # -4e6 -2e6
     parser.add_argument("--episode_limit", type=int, default=500,
-                        help="Maximum number of steps per episode(设置了单个回合(episode)的最长步数)")  # 500
-    # 模型评估参数
+                        help="Maximum number of steps per episode(设置了单个回合(episode)的最长步数)")  # 500    # 模型评估参数
     parser.add_argument("--evaluate_freq", type=float, default=2000,
                         help="Evaluate the policy every 'evaluate_freq' steps-评估当前策略的性能(评估频率).系统暂停常规训练，启动一次独立的性能评估")  # 2000
-
     parser.add_argument("--evaluate_times", type=int, default=20,
-                        help="Evaluate times(“评估次数”。在每次启动性能评估时，模型会连续运行20个独立的回合)")
-    # 数据与训练批次参数
+                        help="Evaluate times(“评估次数”。在每次启动性能评估时，模型会连续运行20个独立的回合)")    # 数据与训练批次参数
     parser.add_argument("--batch_size", type=int, default=20,
                         help="Batch size (On-Policy算法进行一次“策略更新”所需的数据量。程序会先运行并收集20个完整回合的经验数据并存入经验池Replay Buffer)")
-
     parser.add_argument("--mini_batch_size", type=int, default=5,
                         help="Minibatch size (在进行参数更新时，并不会一次性将上述20个回合的数据全部灌入网络，而是会将这个“大批次”切分成若干个“小批次”Mini-batch)")
-
     parser.add_argument("--rnn_hidden_dim", type=int, default=64,
                         help="The number of neurons in hidden layers of the rnn")
-
     parser.add_argument("--mlp_hidden_dim", type=int, default=128,
                         help="The number of neurons in hidden layers of the mlp")
-
     parser.add_argument("--lr", type=float, default=2e-4, help="Learning rate") # 8e-4
     # 更低的学习率会使每次更新的步伐更小、更稳定，通常能有效避免这种断崖式的性能下跌，代价是收敛速度可能会稍慢一些
-
     parser.add_argument("--gamma", type=float, default=0.99, help="Discount factor")
-
     parser.add_argument("--lamda", type=float, default=0.95, help="GAE parameter")
-
     parser.add_argument("--epsilon", type=float, default=0.2, help="GAE parameter")
-
     parser.add_argument("--K_epochs", type=int, default=50, help="GAE parameter")
-
     parser.add_argument("--use_adv_norm", type=bool, default=True, help="Trick 1:advantage normalization")
-
     parser.add_argument("--use_reward_norm", type=bool, default=False, help="Trick 3:reward normalization")
-
     parser.add_argument("--use_reward_scaling", type=bool, default=True,
                         help="Trick 4:reward scaling. Here, we do not use it.") # False
-
     parser.add_argument("--entropy_coef", type=float, default=0.01, help="Trick 5: policy entropy")
-
     parser.add_argument("--use_lr_decay", type=bool, default=True, help="Trick 6:learning rate Decay")
-
     parser.add_argument("--use_grad_clip", type=bool, default=True, help="Trick 7: Gradient clip")
-
     parser.add_argument("--use_orthogonal_init", type=bool, default=True, help="Trick 8: orthogonal initialization")
-
     parser.add_argument("--set_adam_eps", type=float, default=True, help="Trick 9: set Adam epsilon=1e-5")
-
     parser.add_argument("--use_relu", type=float, default=True, help="Whether to use relu, if False, we will use tanh")
-
     parser.add_argument("--use_rnn", type=bool, default=False, help="Whether to use RNN")
-
     parser.add_argument("--add_agent_id", type=float, default=False,
                         help="Whether to add agent_id. Here, we do not use it.")
-
     parser.add_argument("--use_value_clip", type=float, default=True, help="Whether to use value clip.值函数剪切")  # False
-
-    parser.add_argument('--experiment_num', type=str, default="1", help='当前实验的编号/轮次')
-
     parser.add_argument('--device', default='cuda', help='Device to use (e.g., cpu, cuda:0)')
-
     args = parser.parse_args()
     runner = Runner_MAPPO_MPE(args, env_name="simple_1", number=args.experiment_num, seed=0)
     runner.run()
