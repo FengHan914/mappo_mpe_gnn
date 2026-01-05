@@ -21,7 +21,6 @@ def multiply_rows(arr):
         result.append(product)
     return np.array(result)
 
-
 # Trick 8: orthogonal initialization
 def orthogonal_init(layer, gain=1.0):
     for name, param in layer.named_parameters():
@@ -33,71 +32,99 @@ def orthogonal_init(layer, gain=1.0):
 class Actor_RNN(nn.Module):
     def __init__(self, args, actor_input_dim):
         super(Actor_RNN, self).__init__()
+        self.args = args
+        self.actor_input_dim = actor_input_dim  # 自动计算或手动指定的维度
 
-        # 自动计算新维度
-        self.actor_input_dim = args.obs_dim  # 从 args 读取新维度
-        if self.add_agent_id:
-            self.actor_input_dim += args.N  # 如果添加智能体 ID，增加维度
+        # 激活函数选择
+        if args.use_relu:
+            self.activate_func = nn.ReLU()
+        else:
+            self.activate_func = nn.Tanh()
 
-        self.rnn_hidden = None
-        self.fc1 = nn.Linear(actor_input_dim, args.rnn_hidden_dim)  # Actor_RNN
-        # self.fc1 = nn.Linear(actor_input_dim, args.rnn_hidden_dim)   # --原始的输入维度
+        # 第一层全连接
+        self.fc1 = nn.Linear(self.actor_input_dim, args.rnn_hidden_dim)
+
+        # RNN 层 (使用 GRUCell)
         self.rnn = nn.GRUCell(args.rnn_hidden_dim, args.rnn_hidden_dim)
-        # self.fc2 = nn.Linear(args.rnn_hidden_dim, args.action_dim) # 离散动作
 
-        self.fc_mu = torch.nn.Linear(args.rnn_hidden_dim, args.action_dim)  # 连续动作
-        # self.fc_std = torch.nn.Linear(args.rnn_hidden_dim, args.action_dim)
+        # 输出层 (均值)
+        self.fc_mu = nn.Linear(args.rnn_hidden_dim, args.action_dim)
+
+        # 输出层 (标准差 - 这里的 log_std 是一个可学习参数)
         self.log_std = nn.Parameter(torch.zeros(1, args.action_dim))
-        self.activate_func = [nn.Tanh(), nn.ReLU()][args.use_relu]
 
+        # 初始化权重
         if args.use_orthogonal_init:
-            print("------use_orthogonal_init------")
             orthogonal_init(self.fc1)
             orthogonal_init(self.rnn)
-            # orthogonal_init(self.fc2, gain=0.01)  # 离散
-            orthogonal_init(self.fc_mu)
-            # orthogonal_init(self.fc_std)
+            orthogonal_init(self.fc_mu, gain=0.01)
 
-    def forward(self, actor_input):
-        # When 'choose_action': actor_input.shape=(N, actor_input_dim), prob.shape=(N, action_dim)
-        # When 'train':         actor_input.shape=(mini_batch_size*N, actor_input_dim),prob.shape=(mini_batch_size*N, action_dim)
+    def forward(self, actor_input, rnn_hidden=None):
+        """
+        actor_input: (batch_size, obs_dim)
+        rnn_hidden: (batch_size, rnn_hidden_dim) 或 None
+        """
+        # 1. 特征提取
         x = self.activate_func(self.fc1(actor_input))
-        self.rnn_hidden = self.rnn(x, self.rnn_hidden)
-        # prob = torch.softmax(self.fc2(self.rnn_hidden), dim=-1)
-        mu = 1.0 * torch.tanh(self.fc_mu(self.rnn_hidden))
-        # std = F.softplus(self.fc_std(self.rnn_hidden))
-        log_std = self.log_std.expand_as(mu)  # To make 'log_std' have the same dimension as 'mean'
-        std = torch.exp(log_std)  # The reason we train the 'log_std' is to ensure std=exp(log_std)>0
 
-        # return prob
-        return mu, std
+        # 2. RNN 状态处理
+        # 如果是每个episode的第一步，或者没传状态，初始化为全0
+        if rnn_hidden is None:
+            # .new_zeros 确保设备(CPU/GPU)和数据类型与 x 一致
+            rnn_hidden = x.new_zeros(x.size(0), self.rnn.hidden_size)
 
+        # 3. GRUCell 前向传播
+        # rnn_hidden 既是输入也是输出
+        rnn_hidden = self.rnn(x, rnn_hidden)
+
+        # 4. 动作输出
+        # 计算均值 mu (使用 tanh 限制在 -1 到 1 之间，这是常见的连续动作空间做法)
+        mu = torch.tanh(self.fc_mu(rnn_hidden))
+
+        # 计算标准差 std
+        log_std = self.log_std.expand_as(mu)
+        std = torch.exp(log_std)
+
+        # 【关键】返回 mu, std 以及 更新后的 hidden state
+        return mu, std, rnn_hidden
 
 class Critic_RNN(nn.Module):
     def __init__(self, args, critic_input_dim):
         super(Critic_RNN, self).__init__()
-        self.rnn_hidden = None
-
-        self.fc1 = nn.Linear(critic_input_dim, args.rnn_hidden_dim)
+        self.args = args
+        self.critic_input_dim = critic_input_dim
+        if args.use_relu:
+            self.activate_func = nn.ReLU()
+        else:
+            self.activate_func = nn.Tanh()
+        # 第一层全连接
+        self.fc1 = nn.Linear(self.critic_input_dim, args.rnn_hidden_dim)
+        # RNN 层
         self.rnn = nn.GRUCell(args.rnn_hidden_dim, args.rnn_hidden_dim)
-        self.fc2 = nn.Linear(args.rnn_hidden_dim, 1)
-        self.activate_func = [nn.Tanh(), nn.ReLU()][args.use_relu]
+        # 输出层 (Value)
+        self.fc_val = nn.Linear(args.rnn_hidden_dim, 1)
         if args.use_orthogonal_init:
-            print("------use_orthogonal_init------")
             orthogonal_init(self.fc1)
             orthogonal_init(self.rnn)
-            orthogonal_init(self.fc2)
+            orthogonal_init(self.fc_val)
 
-    def forward(self, critic_input):
-        # When 'get_value': critic_input.shape=(N, critic_input_dim), value.shape=(N, 1)
-        # When 'train':     critic_input.shape=(mini_batch_size*N, critic_input_dim), value.shape=(mini_batch_size*N, 1)
+    def forward(self, critic_input, rnn_hidden=None):
+        """
+        critic_input: (batch_size, state_dim)
+        rnn_hidden: (batch_size, rnn_hidden_dim) 或 None
+        """
+        # 1. 特征提取
         x = self.activate_func(self.fc1(critic_input))
-        self.rnn_hidden = self.rnn(x, self.rnn_hidden)
-        value = self.fc2(self.rnn_hidden)
-        return value
+        # 2. RNN 状态处理
+        if rnn_hidden is None:
+            rnn_hidden = x.new_zeros(x.size(0), self.rnn.hidden_size)
+        # 3. GRUCell 前向传播
+        rnn_hidden = self.rnn(x, rnn_hidden)
+        # 4. 计算价值 Value
+        value = self.fc_val(rnn_hidden)
+        # 【关键】返回 value 以及 更新后的 hidden state
+        return value, rnn_hidden
 
-
-#
 class Actor_MLP(nn.Module):
     def __init__(self, args, actor_input_dim):
         super(Actor_MLP, self).__init__()
@@ -131,7 +158,6 @@ class Actor_MLP(nn.Module):
         # return prob
         return mu, std
 
-
 class Critic_MLP(nn.Module):
     def __init__(self, args, critic_input_dim):
         super(Critic_MLP, self).__init__()
@@ -157,7 +183,6 @@ class Critic_MLP(nn.Module):
         x = self.activate_func(self.fc2(x))
         value = self.fc3(x)
         return value
-
 
 class MAPPO_MPE:
     def __init__(self, args, device):
@@ -204,11 +229,10 @@ class MAPPO_MPE:
             print("------use rnn------")
             self.actor = Actor_RNN(args, self.actor_input_dim).to(self.device)
             self.critic = Critic_RNN(args, self.critic_input_dim).to(self.device)
-        else:  # 默认是不使用RNN--->MLP
+        else:
             self.actor = Actor_MLP(args, self.actor_input_dim).to(self.device)   # 基础的前馈神经网络
             self.critic = Critic_MLP(args, self.critic_input_dim).to(self.device)   # 基础的前馈神经网络
             self.ac_parameters = list(self.actor.parameters()) + list(self.critic.parameters())
-            # self.actor = Actor_LSTM(actor_input_dim= self.action_dim, hidden_dim=args.rnn_hidden_dim, action_dim=args.action_dim, num_layers=1).to(args.device)
 
         if self.set_adam_eps:
             print("------set adam eps------")
@@ -240,7 +264,7 @@ class MAPPO_MPE:
                 a_logprob_n = np.sum(a_logprob_n.detach().cpu().numpy(), axis=-1)
                 return a_n.detach().cpu(), a_logprob_n
 
-    # 获取每个智能体当前状态的state value --原始版本MLP
+    # 获取每个智能体当前状态的state value --MLP
     def get_value(self, s):
         with torch.no_grad():
             critic_inputs = []
@@ -272,12 +296,6 @@ class MAPPO_MPE:
             v_target = adv + batch['v_n'][:, :-1]  # v_target.shape(batch_size,episode_limit,N)
             if self.use_adv_norm:  # Trick 1: advantage normalization
                 adv = ((adv - adv.mean()) / (adv.std() + 1e-5))
-
-        """
-            Get actor_inputs and critic_inputs
-            actor_inputs.shape=(batch_size, max_episode_len, N, actor_input_dim)
-            critic_inputs.shape=(batch_size, max_episode_len, N, critic_input_dim)
-        """
         actor_inputs, critic_inputs = self.get_inputs(batch)
 
         # Initialize lists to store losses for this training call
@@ -285,74 +303,10 @@ class MAPPO_MPE:
         critic_losses_epoch = []
 
         # Optimize policy for K epochs:
-        '''for _ in range(self.K_epochs):
-            for index in BatchSampler(SequentialSampler(range(self.batch_size)), self.mini_batch_size, False):
-                if self.use_rnn:
-                    # If use RNN, we need to reset the rnn_hidden of the actor and critic.
-                    self.actor.rnn_hidden = None
-                    self.critic.rnn_hidden = None
-                    actions_mean, actions_std, values_now = [], [], []
-                    for t.py in range(self.episode_limit):
-                        action_mean, action_std = self.actor(
-                            actor_inputs[index, t.py].reshape(self.mini_batch_size * self.N,
-                                                           -1))  # prob.shape=(mini_batch_size*N, action_dim)
-                        actions_mean.append(action_mean.reshape(self.mini_batch_size, self.N,
-                                                                -1))  # prob.shape=(mini_batch_size,N,action_dim）
-                        actions_std.append(action_std.reshape(self.mini_batch_size, self.N, -1))
-                        v = self.critic(critic_inputs[index, t.py].reshape(self.mini_batch_size * self.N,
-                                                                        -1))  # v.shape=(mini_batch_size*N,1)
-                        values_now.append(v.reshape(self.mini_batch_size, self.N))  # v.shape=(mini_batch_size,N)
-                    # Stack them according to the time (dim=1)
-                    actions_mean = torch.stack(actions_mean, dim=1)
-                    actions_std = torch.stack(actions_std, dim=1)
-                    values_now = torch.stack(values_now, dim=1)
-                else:
-                    actions_mean, actions_std = self.actor(actor_inputs[index])
-                    values_now = self.critic(critic_inputs[index]).squeeze(-1)
-
-                dist_now = Normal(actions_mean, actions_std)
-                a_logprob_n_now = dist_now.log_prob(batch['a_n'][index])
-                a_logprob_n_now = torch.sum(a_logprob_n_now, dim=-1)
-                dist_entropy = dist_now.entropy()
-                dist_entropy = torch.sum(dist_entropy, dim=-1).to(
-                    self.device)  # dist_entropy.shape=(mini_batch_size, episode_limit, N)
-                # batch['a_n'][index].shape=(mini_batch_size, episode_limit, N)
-                # a/b=exp(log(a)-log(b))
-                ratios = torch.exp(a_logprob_n_now - batch['a_logprob_n'][
-                    index].detach())  # ratios.shape=(mini_batch_size, episode_limit, N)
-                surr1 = ratios * adv[index]
-                surr2 = torch.clamp(ratios, 1 - self.epsilon, 1 + self.epsilon) * adv[index]
-                actor_loss = -torch.min(surr1, surr2) - self.entropy_coef * dist_entropy
-                self.actor_optimizer.zero_grad()
-                actor_loss = actor_loss.mean()
-                actor_loss.backward()
-                if self.use_grad_clip:  # Trick 7: Gradient clip
-                    torch.nn.utils.clip_grad_norm_(self.actor.parameters(), 10.0)
-                self.actor_optimizer.step()
-
-                if self.use_value_clip:
-                    values_old = batch["v_n"][index, :-1].detach()
-                    values_error_clip = torch.clamp(values_now - values_old, -self.epsilon, self.epsilon) + values_old - \
-                                        v_target[index]
-                    values_error_original = values_now - v_target[index]
-                    critic_loss = torch.max(values_error_clip ** 2, values_error_original ** 2)
-                else:
-                    critic_loss = (values_now - v_target[index]) ** 2
-                self.critic_optimizer.zero_grad()
-                critic_loss = critic_loss.mean()
-                critic_loss.backward()
-                if self.use_grad_clip:  # Trick 7: Gradient clip
-                    torch.nn.utils.clip_grad_norm_(self.critic.parameters(), 10.0)
-                self.critic_optimizer.step()'''
         for _ in range(self.K_epochs):
             for index in BatchSampler(SequentialSampler(range(self.batch_size)), self.mini_batch_size, False):
-                # ... (RNN specific logic if self.use_rnn else MLP logic) ...
-                if self.use_rnn:
-                    # ... (RNN forward pass) ...
-                    pass  # Placeholder for your RNN logic
-                else:
-                    actions_mean, actions_std = self.actor(actor_inputs[index])
-                    values_now = self.critic(critic_inputs[index]).squeeze(-1)
+                actions_mean, actions_std = self.actor(actor_inputs[index])
+                values_now = self.critic(critic_inputs[index]).squeeze(-1)
 
                 dist_now = Normal(actions_mean, actions_std)
                 a_logprob_n_now = dist_now.log_prob(batch['a_n'][index])
@@ -391,35 +345,8 @@ class MAPPO_MPE:
                 critic_losses_epoch.append(current_critic_loss.item())  # Store scalar value
         if self.use_lr_decay:
             self.lr_decay(total_steps)
-
-        # Return the average loss over all K_epochs and mini-batches for this training call
-        # avg_actor_loss = np.mean(actor_losses_epoch) if actor_losses_epoch else 0
-        # avg_critic_loss = np.mean(critic_losses_epoch) if critic_losses_epoch else 0
-
         avg_actor_loss = np.mean(actor_losses_epoch) if actor_losses_epoch else 0
         avg_critic_loss = np.mean(critic_losses_epoch) if critic_losses_epoch else 0
-
-        # dist_now = None
-        # try:
-        #     # Debugging before creating the Normal distribution
-        #     if torch.isnan(actions_mean).any() or torch.isnan(actions_std).any():
-        #         raise ValueError("NaN detected in actions_mean or actions_std!")
-        #     if torch.isinf(actions_mean).any() or torch.isinf(actions_std).any():
-        #         raise ValueError("Inf detected in actions_mean or actions_std!")
-        #     if (actions_std <= 0).any():
-        #         raise ValueError("Invalid values in actions_std (<= 0 detected)!")
-        #
-        #     # Ensure actions_std has valid values
-        #     actions_std = torch.clamp(actions_std, min=1e-6)
-        #
-        #     # Create the Normal distribution
-        #     dist_now = Normal(actions_mean, actions_std)
-        # except ValueError as e:
-        #     print("Error when creating Normal distribution:", e)
-        #     print("actions_mean:", actions_mean)
-        #     print("actions_std:", actions_std)
-        #     raise e  # Optional: Rethrow the exception if you want to terminate
-
         return avg_actor_loss, avg_critic_loss  # <--- MODIFIED: Return losses
 
     def lr_decay(self, total_steps):  # Trick 6: learning rate Decay
